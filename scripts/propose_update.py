@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""Publish a verified release update and merge its exact commit after PR checks."""
+
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+import time
+
+REPOSITORY = "nouli-ai/homebrew-tap"
+FORMULA = "Formula/nouli.rb"
+UPSTREAM = "nouli-ai/nouli"
+
+def run(root, *args, token=None):
+    return subprocess.run(
+        args, cwd=root, check=True, text=True, stdout=subprocess.PIPE,
+        env=None if token is None else {**os.environ, "GH_TOKEN": token},
+    ).stdout.rstrip("\n")
+
+
+def wait_for_validation(root, number, head, check_token, repository=REPOSITORY, timeout=720):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        pull = json.loads(run(
+            root, "gh", "pr", "view", str(number), "--repo", repository,
+            "--json", "headRefOid,statusCheckRollup", token=check_token,
+        ))
+        if pull["headRefOid"] != head:
+            raise ValueError("The PR changed while waiting for validation")
+        checks = [
+            check for check in (pull.get("statusCheckRollup") or [])
+            if check.get("__typename") == "CheckRun"
+            and check.get("name") == "Tap validation"
+        ]
+        if checks:
+            for check in checks:
+                if check["status"] == "COMPLETED" and check["conclusion"] != "SUCCESS":
+                    raise ValueError("Required Tap validation did not pass")
+            if all(check["status"] == "COMPLETED" for check in checks):
+                return
+        time.sleep(10)
+    raise TimeoutError("Timed out waiting for required Tap validation")
+
+def propose_update(root, version, app_slug, repository, check_token):
+    if repository != REPOSITORY:
+        raise ValueError(f"The update bot is restricted to {REPOSITORY}")
+    owner = repository.split("/", 1)[0]
+    if not re.fullmatch(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", version):
+        raise ValueError("Expected a stable MAJOR.MINOR.PATCH version")
+    if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", app_slug):
+        raise ValueError("Expected the GitHub App's slug")
+    contents = (root / FORMULA).read_text()
+    # Every Nouli download URL must name the selected version, however many targets the formula has.
+    urls = contents.count("/releases/download/v")
+    current = urls > 0 and contents.count(f"/releases/download/v{version}/nouli-{version}-") == urls
+    if not current:
+        raise ValueError("The formula does not contain the selected version")
+
+    branch = f"formula/nouli-{version}"
+    title = f"formula: replace Nouli release with {version}"
+    bot = f"{app_slug}[bot]"
+    pulls = json.loads(run(
+        root, "gh", "api", "--method", "GET", f"repos/{repository}/pulls",
+        "-f", "state=all", "-f", f"head={owner}:{branch}",
+        "-f", "base=main", "-f", "per_page=100",
+    ))
+    existing = max(pulls, key=lambda pull: pull["number"], default=None)
+    if existing is not None:
+        if existing["state"] != "open":
+            print(f"PR #{existing['number']} is closed; leaving this release alone")
+            return
+        if existing["user"]["login"] != bot:
+            raise ValueError("The existing PR was not opened by the tap update bot")
+
+    changes = run(root, "git", "status", "--porcelain", "--untracked-files=all")
+    if changes not in (f" M {FORMULA}", f"M  {FORMULA}"):
+        raise ValueError(f"A release update must change only {FORMULA}")
+    run(root, "git", "add", "--", FORMULA)
+    validated_tree = run(root, "git", "write-tree")
+    run(root, "gh", "auth", "setup-git", "--hostname", "github.com")
+
+    remote = run(root, "git", "ls-remote", "--heads", "origin", branch)
+    if remote:
+        run(root, "git", "fetch", "--no-tags", "origin", f"refs/heads/{branch}")
+        head = run(root, "git", "rev-parse", "FETCH_HEAD")
+        if run(root, "git", "rev-parse", f"{head}^{{tree}}") != validated_tree:
+            raise ValueError("The existing branch differs from the validated update")
+    else:
+        if existing is not None:
+            raise ValueError("The existing PR's branch is missing")
+        user = json.loads(run(root, "gh", "api", f"users/{bot}"))
+        run(root, "git", "switch", "-c", branch)
+        run(
+            root, "git", "-c", f"user.name={bot}",
+            "-c", f"user.email={user['id']}+{bot}@users.noreply.github.com",
+            "commit", "-m", title,
+        )
+        head = run(root, "git", "rev-parse", "HEAD")
+        run(root, "git", "push", "origin", f"HEAD:refs/heads/{branch}")
+
+    if existing is None:
+        with tempfile.TemporaryDirectory(prefix="tap-release-pr-") as directory:
+            body = Path(directory) / "body.md"
+            body.write_text(
+                f"Update Nouli to the published stable release v{version}.\n\n"
+                "The updater verified the release archives against their published checksum files. "
+                "Tap validation must pass for this exact commit before it can merge.\n\n"
+                f"Upstream release: https://github.com/{UPSTREAM}/releases/tag/v{version}\n"
+            )
+            print(run(
+                root, "gh", "pr", "create", "--repo", repository,
+                "--base", "main", "--head", branch,
+                "--title", title,
+                "--body-file", str(body),
+            ))
+
+    pull = json.loads(run(
+        root, "gh", "pr", "view", branch, "--repo", repository, "--json",
+        "number,author,baseRefName,headRefName,headRefOid,isCrossRepository,isDraft,files,state",
+    ))
+    if (
+        pull["state"] != "OPEN"
+        or pull["isDraft"]
+        or pull["isCrossRepository"]
+        or pull["author"].get("is_bot") is not True
+        or pull["author"]["login"] != f"app/{app_slug}"
+        or pull["baseRefName"] != "main"
+        or pull["headRefName"] != branch
+        or pull["headRefOid"] != head
+        or [file["path"] for file in pull["files"]] != [FORMULA]
+    ):
+        raise ValueError("The PR must contain exactly the validated bot formula update")
+    wait_for_validation(root, pull["number"], head, check_token, repository)
+    print(run(
+        root, "gh", "pr", "merge", str(pull["number"]), "--repo", repository,
+        "--squash", "--match-head-commit", head,
+    ))
+
+
+if __name__ == "__main__":
+    propose_update(
+        Path(__file__).resolve().parent.parent,
+        os.environ["VERSION"], os.environ["APP_SLUG"], os.environ["GH_REPO"],
+        os.environ["GH_CHECK_TOKEN"],
+    )

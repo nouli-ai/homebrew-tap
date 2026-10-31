@@ -1,0 +1,90 @@
+name: Check tap
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  select:
+    name: Check tooling and select installation checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      nouli: ${{ github.event_name == 'workflow_dispatch' || steps.changes.outputs.nouli == 'true' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dorny/paths-filter@v4
+        id: changes
+        with:
+          base: ${{ github.event_name == 'push' && github.event.before || github.event_name == 'pull_request' && github.base_ref || 'HEAD~1' }}
+          filters: |
+            nouli:
+              - 'Formula/**'
+              - 'scripts/**'
+              - 'tests/**'
+              - 'Makefile'
+              - '.github/**'
+      - name: Test release update and PR protections
+        run: python3 -m unittest discover -s tests -v
+      - name: Lint workflows
+        run: docker run --rm -v "$PWD:/repo" --workdir /repo rhysd/actionlint:1.7.12 -color
+      - name: Lint shell scripts
+        run: shellcheck scripts/*.sh
+  nouli:
+    name: Install Nouli (${{ matrix.os }})
+    needs: select
+    if: needs.select.outputs.nouli == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-24.04-arm, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      HOMEBREW_NO_ANALYTICS: 1
+      HOMEBREW_NO_INSTALL_CLEANUP: 1
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Homebrew/actions/setup-homebrew@ae72030040bc05e2d65c41c577092cb98bc0a27e
+        with:
+          stable: true
+      - name: Register the CI checkout
+        run: bash scripts/link-tap.sh
+      - name: Trust the formula in this CI installation
+        run: brew trust --formula nouli-ai/tap/nouli
+      - name: Check formula style
+        run: brew style Formula/nouli.rb
+      - name: Audit the formula
+        run: brew audit --formula nouli-ai/tap/nouli
+      - name: Install the published binary
+        run: brew install --formula nouli-ai/tap/nouli
+      - name: Check the installed CLI
+        run: brew test nouli-ai/tap/nouli
+      - name: Remove the package
+        if: always()
+        run: |
+          if brew list --formula nouli >/dev/null 2>&1; then
+            brew uninstall --formula nouli-ai/tap/nouli
+          fi
+  check:
+    name: Tap validation
+    needs: [select, nouli]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require the selected checks to pass
+        if: needs.select.result != 'success' || contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1

@@ -25,6 +25,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: dorny/paths-filter@v4
+        if: github.event_name != 'workflow_dispatch'
         id: changes
         with:
           base: ${{ github.event_name == 'push' && github.event.before || github.event_name == 'pull_request' && github.base_ref || 'HEAD~1' }}

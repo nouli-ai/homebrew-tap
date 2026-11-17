@@ -8,14 +8,14 @@ class Nouli < Formula
   end
 
   if OS.mac?
-    url "https://github.com/nouli-ai/nouli/releases/download/v0.5.1/nouli-0.5.1-aarch64-apple-darwin.tar.gz"
-    sha256 "1f65b7f0c55ea53020df69f1e88e4272817266060f639328fb406286f7bb628a"
+    url "https://github.com/nouli-ai/nouli/releases/download/v0.6.0/nouli-0.6.0-aarch64-apple-darwin.tar.gz"
+    sha256 "3e6957df81acb73337357d30fe65a1ed046d8f3a4973bba6f74f84012e71b19c"
   elsif Hardware::CPU.arm?
-    url "https://github.com/nouli-ai/nouli/releases/download/v0.5.1/nouli-0.5.1-aarch64-unknown-linux-gnu.tar.gz"
-    sha256 "5afc3275f937551fc3901f8db176486666b331827b9442623d2807d6074656a4"
+    url "https://github.com/nouli-ai/nouli/releases/download/v0.6.0/nouli-0.6.0-aarch64-unknown-linux-gnu.tar.gz"
+    sha256 "e30a7618c46cf68a7ae2d24393932fe2185c254df3af2c5267b1b8458a778985"
   else
-    url "https://github.com/nouli-ai/nouli/releases/download/v0.5.1/nouli-0.5.1-x86_64-unknown-linux-gnu.tar.gz"
-    sha256 "4e65df7881b5245592f804b0dcb5039d0ce757ee8af3d7727815de8155de9f70"
+    url "https://github.com/nouli-ai/nouli/releases/download/v0.6.0/nouli-0.6.0-x86_64-unknown-linux-gnu.tar.gz"
+    sha256 "d2ad6c36acb0e4fac6bcf27e0e7bb420f095ab4695ffce3df0c7cddd7f746aa4"
   end
 
   def install
